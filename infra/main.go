@@ -20,11 +20,6 @@ func newStack(scope constructs.Construct, id string, props *awscdk.StackProps) a
 		Timeout:      awscdk.Duration_Seconds(jsii.Number(30)),
 	})
 	url := fn.AddFunctionUrl(&awslambda.FunctionUrlOptions{AuthType: awslambda.FunctionUrlAuthType_NONE})
-	// Public Function URLs also require InvokeFunction, limited to URL requests.
-	permission := awslambda.NewCfnPermission(stack, jsii.String("FunctionUrlInvokePermission"), &awslambda.CfnPermissionProps{
-		Action: jsii.String("lambda:InvokeFunction"), FunctionName: fn.FunctionName(), Principal: jsii.String("*"),
-	})
-	permission.AddPropertyOverride(jsii.String("InvokedViaFunctionUrl"), jsii.Bool(true))
 	awscdk.NewCfnOutput(stack, jsii.String("ApiUrl"), &awscdk.CfnOutputProps{Value: url.Url()})
 	return stack
 }
