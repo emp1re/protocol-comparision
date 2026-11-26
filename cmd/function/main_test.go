@@ -71,6 +71,38 @@ func TestBinaryAPIGatewayEvent(t *testing.T) {
 	}
 }
 
+func TestMultipartPayloadWithoutFilename(t *testing.T) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("payload", "aGVsbG8="); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.WriteField("type", "meetings"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/bin", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+	newRouter().ServeHTTP(w, req)
+	var result struct {
+		Payload struct {
+			Type string `json:"type"`
+		} `json:"payload"`
+		Metrics struct {
+			DataBytes int `json:"data_bytes"`
+		} `json:"metrics"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != http.StatusOK || result.Payload.Type != "meetings" || result.Metrics.DataBytes != 8 {
+		t.Fatalf("unexpected response: %d %s", w.Code, w.Body)
+	}
+}
+
 func TestProtoEndpoints(t *testing.T) {
 	message := []byte{0x0a, 0x03, 0x00, 0xff, 0x2a}
 	var compressed bytes.Buffer

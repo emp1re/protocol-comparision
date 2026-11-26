@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -22,7 +23,7 @@ import (
 )
 
 type payloadInfo struct {
-	Data    []byte     `json:"-"`
+	Payload []byte     `json:"-"`
 	Time    *time.Time `json:"time,omitempty"`
 	TimeEnd *time.Time `json:"time_end,omitempty"`
 	Type    string     `json:"type"`
@@ -47,6 +48,7 @@ func main() {
 
 func newRouter() *gin.Engine {
 	r := gin.New()
+	r.Use(gin.Logger())
 	r.Use(gin.Recovery())
 	r.Use(func(c *gin.Context) {
 		c.Set("started", time.Now())
@@ -64,6 +66,8 @@ func newRouter() *gin.Engine {
 	})
 	r.POST("/api/proto", protoHandler)
 	r.POST("/api/protozip", protoHandler)
+	r.POST("/api/protobatch", protoBatchHandler)
+	r.POST("/api/protobatchzip", protoBatchHandler)
 	r.POST("/api/json", jsonHandler)
 	r.POST("/api/jsonzip", jsonHandler)
 
@@ -120,15 +124,15 @@ func binHandler(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid multipart field"})
 			return
 		}
+		fmt.Println("Name", part.FormName())
 		switch part.FormName() {
-		case "file", "data":
-			if part.FileName() == "" {
-				continue
-			}
-			payload.Data = value
+		case "file", "payload":
+			payload.Payload = value
 			foundData = true
-			c.Set("filename", part.FileName())
-			c.Set("file_content_type", part.Header.Get("Content-Type"))
+			if part.FileName() != "" {
+				c.Set("filename", part.FileName())
+				c.Set("file_content_type", part.Header.Get("Content-Type"))
+			}
 		case "type":
 			payload.Type = string(value)
 		case "time", "timeEnd", "time_end":
@@ -146,17 +150,17 @@ func binHandler(c *gin.Context) {
 	}
 
 	if !foundData {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "multipart file field is required"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "multipart file or payload field is required"})
 		return
 	}
 
 	c.Set("payload", payload)
-	process(c, payload.Data)
+	process(c, payload.Payload)
 }
 
 func jsonHandler(c *gin.Context) {
 	var body struct {
-		Data    *string    `json:"data"`
+		Payload *string    `json:"payload"`
 		Time    *time.Time `json:"time"`
 		TimeEnd *time.Time `json:"time_end"`
 		Type    string     `json:"type"`
@@ -172,18 +176,18 @@ func jsonHandler(c *gin.Context) {
 		defer gz.Close()
 		c.Request.Body = io.NopCloser(gz)
 	}
-	if err := c.ShouldBindJSON(&body); err != nil || body.Data == nil {
+	if err := c.ShouldBindJSON(&body); err != nil || body.Payload == nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "expected JSON with a base64 data field"})
 		return
 	}
 
-	data, err := base64.StdEncoding.Strict().DecodeString(*body.Data)
+	data, err := base64.StdEncoding.Strict().DecodeString(*body.Payload)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "data must be valid standard base64"})
 		return
 	}
 
-	c.Set("payload", &payloadInfo{Data: data, Time: body.Time, TimeEnd: body.TimeEnd, Type: body.Type})
+	c.Set("payload", &payloadInfo{Payload: data, Time: body.Time, TimeEnd: body.TimeEnd, Type: body.Type})
 	process(c, data)
 }
 
@@ -220,7 +224,48 @@ func protoHandler(c *gin.Context) {
 
 	c.Set("payload", payload)
 
-	process(c, payload.Data)
+	process(c, payload.Payload)
+}
+
+func protoBatchHandler(c *gin.Context) {
+	var reader io.Reader = c.Request.Body
+
+	encoding := strings.TrimSpace(c.GetHeader("Content-Encoding"))
+	if strings.EqualFold(encoding, "gzip") {
+		gz, err := gzip.NewReader(reader)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "expected gzip-compressed protobuf"})
+			return
+		}
+		defer gz.Close()
+		reader = gz
+	} else if encoding != "" && !strings.EqualFold(encoding, "identity") {
+		c.JSON(http.StatusUnsupportedMediaType, gin.H{"error": "unsupported content encoding"})
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(reader, maxBodySize+1))
+	if err != nil || len(body) > maxBodySize {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid or oversized protobuf body"})
+		return
+	}
+
+	c.Set("protobuf_bytes", len(body))
+
+	batch, err := decodeProtoBatch(body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid protobuf batch"})
+		return
+	}
+
+	c.Set("batch_entries", len(batch))
+	var totalData int64
+	for _, p := range batch {
+		totalData += int64(len(p.Payload))
+	}
+	c.Set("total_data_bytes", totalData)
+	
+	processBatch(c, batch)
 }
 
 // Decode Payload from proto/input.proto, ignoring unknown fields.
@@ -239,7 +284,10 @@ func decodeProto(body []byte) (*payloadInfo, error) {
 			}
 			switch num {
 			case 1:
-				payload.Data = value
+				if !utf8.Valid(value) {
+					return nil, errors.New("invalid UTF-8")
+				}
+				payload.Type = string(value)
 			case 2, 3:
 				var timestamp timestamppb.Timestamp
 				if err := proto.Unmarshal(value, &timestamp); err != nil {
@@ -255,10 +303,7 @@ func decodeProto(body []byte) (*payloadInfo, error) {
 					payload.TimeEnd = &t
 				}
 			case 4:
-				if !utf8.Valid(value) {
-					return nil, errors.New("invalid UTF-8")
-				}
-				payload.Type = string(value)
+				payload.Payload = value
 			}
 			body = body[size:]
 			continue
@@ -270,6 +315,39 @@ func decodeProto(body []byte) (*payloadInfo, error) {
 		body = body[size:]
 	}
 	return payload, nil
+}
+
+// Decode Batch from proto/input.proto containing multiple Payload entries.
+func decodeProtoBatch(body []byte) ([]*payloadInfo, error) {
+	var batch []*payloadInfo
+	
+	for len(body) > 0 {
+		num, typ, n := protowire.ConsumeTag(body)
+		if n < 0 {
+			return nil, protowire.ParseError(n)
+		}
+		body = body[n:]
+		
+		if num == 1 && typ == protowire.BytesType {
+			value, size := protowire.ConsumeBytes(body)
+			if size < 0 {
+				return nil, protowire.ParseError(size)
+			}
+			payload, err := decodeProto(value)
+			if err != nil {
+				return nil, err
+			}
+			batch = append(batch, payload)
+			body = body[size:]
+		} else {
+			size := protowire.ConsumeFieldValue(num, typ, body)
+			if size < 0 {
+				return nil, protowire.ParseError(size)
+			}
+			body = body[size:]
+		}
+	}
+	return batch, nil
 }
 
 // Replace this function with the application's processing logic.
@@ -303,6 +381,34 @@ func process(c *gin.Context, data []byte) {
 	response := gin.H{"metrics": metrics}
 	if payload, ok := c.Get("payload"); ok {
 		response["payload"] = payload
+	}
+	c.JSON(http.StatusOK, response)
+}
+
+func processBatch(c *gin.Context, batch []*payloadInfo) {
+	started := c.MustGet("started").(time.Time)
+	format := "protobuf"
+	encoding := c.GetHeader("Content-Encoding")
+	if encoding == "" {
+		encoding = "identity"
+	}
+	metrics := gin.H{
+		"timestamp":        started.Format("2006-01-02T15:04:05Z07:00"),
+		"endpoint":         c.FullPath(),
+		"format":           format,
+		"content_type":     c.GetHeader("Content-Type"),
+		"content_encoding": encoding,
+		"request_bytes":    c.GetInt("request_bytes"),
+		"batch_entries":    c.GetInt("batch_entries"),
+		"total_data_bytes": c.GetInt("total_data_bytes"),
+		"elapsed_ns":       time.Since(started).Nanoseconds(),
+	}
+	if size, ok := c.Get("protobuf_bytes"); ok {
+		metrics["protobuf_bytes"] = size
+	}
+	response := gin.H{
+		"metrics": metrics,
+		"batch":   batch,
 	}
 	c.JSON(http.StatusOK, response)
 }
