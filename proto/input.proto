@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package lambda;
+
+import "google/protobuf/timestamp.proto";
+
+message Payload {
+  bytes data = 1;
+  google.protobuf.Timestamp time = 2;
+  google.protobuf.Timestamp time_end = 3;
+  string type = 4;
+}
+
+message Batch {
+  repeated Payload entries = 1;
+}
