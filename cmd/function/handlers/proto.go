@@ -3,6 +3,7 @@ package handlers
 import (
 	"compress/gzip"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -92,6 +93,7 @@ func decodeProto(body []byte) (*payloadInfo, error) {
 		if n < 0 {
 			return nil, protowire.ParseError(n)
 		}
+		fmt.Printf("Tag: num=%d typ=%v\n", num, typ)
 		body = body[n:]
 		if num >= 1 && num <= 4 && typ == protowire.BytesType {
 			value, size := protowire.ConsumeBytes(body)

@@ -37,7 +37,9 @@ func JsonHandler(c *gin.Context) {
 		return
 	}
 
-	c.Set("payload", &payloadInfo{Payload: data, Time: body.Time, TimeEnd: body.TimeEnd, Type: body.Type})
+	p := &payloadInfo{Payload: data, Time: body.Time, TimeEnd: body.TimeEnd, Type: body.Type}
+
+	c.Set("payload", p)
 	process(c, data)
 }
 

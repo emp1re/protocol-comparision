@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"errors"
-	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -39,7 +38,7 @@ func BinHandler(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid multipart field"})
 			return
 		}
-		fmt.Println("Name", part.FormName())
+
 		switch part.FormName() {
 		case "file", "payload":
 			payload.Payload = value
